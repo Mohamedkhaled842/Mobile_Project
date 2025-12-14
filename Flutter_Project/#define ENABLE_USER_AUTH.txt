@@ -1,0 +1,146 @@
+#define ENABLE_USER_AUTH
+#define ENABLE_DATABASE
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <FirebaseClient.h>
+
+// Network and Firebase credentials
+#define WIFI_SSID "Turjman" // REPLACE_WITH_YOUR_SSID
+#define WIFI_PASSWORD "56567788" // REPLACE_WITH_YOUR_PASSWORD
+
+#define Web_API_KEY "AIzaSyCjC4ZYCNWEiPB0wNkpoGAytdsrsK3BZoc"
+#define DATABASE_URL "https://mfrc522-esp32-default-rtdb.europe-west1.firebasedatabase.app/"
+#define USER_EMAIL "test@test.com"
+#define USER_PASS "56567788"
+
+// User function
+void processData(AsyncResult &aResult);
+
+// Authentication
+UserAuth user_auth(Web_API_KEY, USER_EMAIL, USER_PASS);
+
+// Firebase components
+FirebaseApp app;
+WiFiClientSecure ssl_client;
+using AsyncClient = AsyncClientClass;
+AsyncClient aClient(ssl_client);
+RealtimeDatabase Database;
+
+// Timer variables for sending data every 10 seconds
+unsigned long lastSendTime = 0;
+const unsigned long sendInterval = 1000; // 1 second in milliseconds
+
+// Variables to send to the database
+int intValue = 0;
+float floatValue = 0.01;
+String stringValue = "";
+
+#include <MFRC522v2.h>
+#include <MFRC522DriverSPI.h>
+//#include <MFRC522DriverI2C.h>
+#include <MFRC522DriverPinSimple.h>
+#include <MFRC522Debug.h>
+
+// Learn more about using SPI/I2C or check the pin assigment for your board: https://github.com/OSSLibraries/Arduino_MFRC522v2#pin-layout
+MFRC522DriverPinSimple ss_pin(5);
+
+MFRC522DriverSPI driver{ss_pin}; // Create SPI driver
+//MFRC522DriverI2C driver{};     // Create I2C driver
+MFRC522 mfrc522{driver};         // Create MFRC522 instance
+
+void setup() {
+  Serial.begin(115200);  // Initialize serial communication
+  while (!Serial);       // Do nothing if no serial port is opened (added for Arduinos based on ATMEGA32U4).
+
+  // Connect to Wi-Fi
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(300);
+  }
+  Serial.println();
+
+  // Configure SSL client
+  ssl_client.setInsecure();
+  ssl_client.setConnectionTimeout(1000);
+  ssl_client.setHandshakeTimeout(5);
+
+  // Initialize Firebase
+  initializeApp(aClient, app, getAuth(user_auth), processData, "🔐 authTask");
+  app.getApp<RealtimeDatabase>(Database);
+  Database.url(DATABASE_URL);
+
+  mfrc522.PCD_Init();    // Init MFRC522 board.
+  MFRC522Debug::PCD_DumpVersionToSerial(mfrc522, Serial);  // Show details of PCD - MFRC522 Card Reader details.
+  Serial.println(F("Scan PICC to see UID, SAK, type, and data blocks..."));
+}
+
+uint32_t timeSnap = millis();
+uint32_t Card_UID = 0;
+
+void loop() {
+  if (millis() - timeSnap > 500) {
+    timeSnap = millis();
+
+    uint8_t isReady = true;
+
+    // Reset the loop if no new card present on the sensor/reader. This saves the entire process when idle.
+    if (!mfrc522.PICC_IsNewCardPresent()) {
+      isReady = false;
+    }
+
+    // Select one of the cards.
+    if (!mfrc522.PICC_ReadCardSerial()) {
+      isReady = false;
+    }
+
+    if (isReady == true) {
+      // Dump debug info about the card; PICC_HaltA() is automatically called.
+      MFRC522Debug::PICC_DumpToSerial(mfrc522, Serial, &(mfrc522.uid));
+      Card_UID = mfrc522.uid.size;
+      Card_UID = (mfrc522.uid.uidByte[0] << 24) | (mfrc522.uid.uidByte[1] << 16) |  (mfrc522.uid.uidByte[2]) << 8 | (mfrc522.uid.uidByte[3] << 0);
+    }
+  }
+
+  // Maintain authentication and async tasks
+  app.loop();
+  // Check if authentication is ready
+  if (app.ready()) {
+    // Periodic data sending every 1 second
+    unsigned long currentTime = millis();
+    if (currentTime - lastSendTime >= sendInterval) {
+      // Update the last send time
+      lastSendTime = currentTime;
+      if (Card_UID) {
+        // send a string
+        stringValue = "Card Read timeSnap: " + String(millis());
+        Database.set<String>(aClient, "/Menna/Card_timeSnap", stringValue, processData, "RTDB_Send_Card_timeSnap");
+
+        // send a UID
+        Database.set<uint32_t>(aClient, "/Menna/Card_UID", Card_UID, processData, "RTDB_Send_Card_UID");
+
+        Card_UID = 0;
+      }
+    }
+  }
+}
+
+void processData(AsyncResult &aResult) {
+  if (!aResult.isResult())
+    return;
+
+  if (aResult.isEvent())
+    Firebase.printf("Event task: %s, msg: %s, code: %d\n", aResult.uid().c_str(), aResult.eventLog().message().c_str(), aResult.eventLog().code());
+
+  if (aResult.isDebug())
+    Firebase.printf("Debug task: %s, msg: %s\n", aResult.uid().c_str(), aResult.debug().c_str());
+
+  if (aResult.isError())
+    Firebase.printf("Error task: %s, msg: %s, code: %d\n", aResult.uid().c_str(), aResult.error().message().c_str(), aResult.error().code());
+
+  if (aResult.available())
+    Firebase.printf("task: %s, payload: %s\n", aResult.uid().c_str(), aResult.c_str());
+}
